@@ -36,7 +36,7 @@ CAD_ZIP_URL   = (
     "https://www.tad.org/content/data-download/"
     "PropertyData_R_2025(Certified).ZIP"
 )
-LOOKBACK_DAYS   = 7
+LOOKBACK_DAYS   = 30
 PAGE_LIMIT      = 250
 REQUEST_TIMEOUT = 300
 
