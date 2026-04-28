@@ -1,16 +1,11 @@
 #!/usr/bin/env python3
 """
 Tarrant County TX – Motivated Seller Lead Scraper
+Clerk  : tarrant.tx.publicsearch.us
+CAD    : TAD via Google Drive (pipe-delimited)
 """
 
-import asyncio
-import csv
-import io
-import json
-import logging
-import re
-import traceback
-import zipfile
+import asyncio, csv, io, json, os, re, unicodedata, zipfile, traceback
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -22,21 +17,23 @@ try:
 except ImportError:
     HAS_PLAYWRIGHT = False
 
-import httpx
+import gdown
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-log = logging.getLogger(__name__)
+logging_import = True
+try:
+    import logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    log = logging.getLogger(__name__)
+except Exception:
+    logging_import = False
 
-BASE_URL      = "https://tarrant.tx.publicsearch.us"
-CAD_ZIP_URL   = (
-    "https://www.tad.org/content/data-download/"
-    "PropertyData_R_2025(Certified).ZIP"
-)
-LOOKBACK_DAYS   = 12    
+LOOKBACK_DAYS   = int(os.getenv("LOOKBACK_DAYS", "14"))
+BASE_URL        = "https://tarrant.tx.publicsearch.us"
+GDRIVE_FILE_ID  = "1rM_teshJtTosA92fsHQ5MqxVu4oK5int"
 PAGE_LIMIT      = 250
 REQUEST_TIMEOUT = 300
 
@@ -128,21 +125,20 @@ def is_entity(name: str) -> bool:
     return any(x in n for x in ENTITY_FILTERS)
 
 
-# ── CAD LOOKUP ────────────────────────────────────────────────────────────
+# ── CAD LOADER ────────────────────────────────────────────────────────────────
 
 def build_parcel_lookup() -> dict:
     lookup = {}
-    log.info("Downloading TAD residential CAD data ...")
+    log.info("Downloading TAD CAD data via Google Drive ...")
     try:
-        resp = httpx.get(CAD_ZIP_URL, timeout=120, follow_redirects=True,
-                         headers={"User-Agent": "Mozilla/5.0"})
-        resp.raise_for_status()
-        log.info(f"  Downloaded {len(resp.content)/1_048_576:.1f} MB")
+        tmp_path = "/tmp/tad_res.zip"
+        gdown.download(id=GDRIVE_FILE_ID, output=tmp_path, quiet=False)
 
-        zf      = zipfile.ZipFile(io.BytesIO(resp.content))
-        fname   = next(n for n in zf.namelist() if n.upper().endswith(".TXT"))
-        raw     = zf.read(fname).decode("latin-1")
+        zf   = zipfile.ZipFile(tmp_path)
+        name = next(n for n in zf.namelist() if n.upper().endswith(".TXT"))
+        raw  = zf.read(name).decode("latin-1")
 
+        log.info(f"  Parsing {name} ...")
         total = 0
         reader = csv.reader(io.StringIO(raw), delimiter="|")
         for row in reader:
@@ -158,12 +154,14 @@ def build_parcel_lookup() -> dict:
             owner_name = row[6].strip().upper()
             if not owner_name or is_entity(owner_name):
                 continue
-            situs      = row[12].strip()
+            acct       = row[2].strip().lstrip("0") or row[2].strip()
             mail_addr  = row[7].strip()
             city_state = row[8].strip()
             mail_zip   = row[9].strip()
             mail_city  = city_state.split(",")[0].strip() if "," in city_state else city_state
             mail_state = city_state.split(",")[1].strip() if "," in city_state else "TX"
+            situs      = row[12].strip()
+
             parcel = {
                 "prop_address": situs,
                 "prop_city":    "Fort Worth",
@@ -178,7 +176,7 @@ def build_parcel_lookup() -> dict:
                 lookup[variant] = parcel
             total += 1
             if total % 50000 == 0:
-                log.info(f"  Processed {total:,} parcels...")
+                log.info(f"  Processed {total:,} parcels ...")
 
         log.info(f"TAD lookup built: {len(lookup):,} name variants from {total:,} parcels")
     except Exception:
@@ -186,7 +184,7 @@ def build_parcel_lookup() -> dict:
     return lookup
 
 
-# ── TEXT BLOCK PARSER ─────────────────────────────────────────────────────
+# ── TEXT BLOCK PARSER ─────────────────────────────────────────────────────────
 
 def parse_text_block(text: str, doc_code: str, cat: str, cat_label: str,
                      dt_from: str, dt_to: str) -> Optional[dict]:
@@ -213,7 +211,7 @@ def parse_text_block(text: str, doc_code: str, cat: str, cat_label: str,
         if not grantor or not filed_raw:
             return None
         search_url = (f"{BASE_URL}/results?department=RP&_docTypes={doc_code}"
-                      f"&recordedDateRange={dt_from},{dt_to}&searchType=advancedSearch")
+                      f"&recordedDateRange={dt_from},{dt_to}&searchType=quickSearch")
         return {
             "doc_num":   doc_num,
             "doc_type":  doc_code,
@@ -231,7 +229,7 @@ def parse_text_block(text: str, doc_code: str, cat: str, cat_label: str,
         return None
 
 
-# ── PLAYWRIGHT SCRAPER ────────────────────────────────────────────────────
+# ── PLAYWRIGHT SCRAPER ────────────────────────────────────────────────────────
 
 JS_WAIT_FOR_ROWS = """
     async () => {
@@ -265,7 +263,7 @@ async def scrape_doc_type(browser, doc_code: str, cat: str, cat_label: str,
                f"?department=RP"
                f"&_docTypes={doc_code}"
                f"&recordedDateRange={dt_from},{dt_to}"
-               f"&searchType=advancedSearch"
+               f"&searchType=quickSearch"
                f"&limit={PAGE_LIMIT}"
                f"&offset={offset}")
         log.info(f"  {doc_code} offset={offset} ...")
@@ -316,20 +314,19 @@ async def scrape_all_playwright(date_from: str, date_to: str) -> list:
     return all_records
 
 
-# ── DEMO DATA ─────────────────────────────────────────────────────────────
+# ── DEMO DATA ─────────────────────────────────────────────────────────────────
 
 def generate_demo_records(date_from: str, date_to: str) -> list:
     samples = [
-        ("LP",  "pre_foreclosure", "Lis Pendens",          "SMITH ROBERT",          "ROCKET MORTGAGE LLC",  0),
-        ("JUD", "judgment",        "Judgment",              "JONES MARY B",          "CAPITAL ONE NA",   87500),
-        ("FTL", "lien",            "Federal Tax Lien",      "WILLIAMS DAVID",        "IRS",              45200),
-        ("AJ",  "judgment",        "Abstract of Judgment",  "JOHNSON PATRICIA",      "CITIBANK NA",      18700),
-        ("ML",  "lien",            "Mechanics Lien",        "BROWN MICHAEL",         "LONE STAR CONTR",  22000),
-        ("PB",  "probate",         "Probate",               "ESTATE OF DAVIS JAMES", "TARRANT CO PROB",      0),
-        ("STL", "lien",            "State Tax Lien",        "HENDERSON ROBERT",      "STATE OF TEXAS",    9800),
-        ("CSL", "lien",            "Child Support Lien",    "RODRIGUEZ JUAN",        "ATTY/GEN",          5000),
-        ("ALN", "lien",            "HOA Lien",              "THOMPSON SARAH",        "TARRANT HOA",       2100),
-        ("AH",  "probate",         "Affidavit of Heirship", "GARCIA CARLOS",         "GARCIA MARIA",         0),
+        ("LP",   "pre_foreclosure", "Lis Pendens",          "SMITH ROBERT",          "ROCKET MORTGAGE LLC",  0),
+        ("J",    "judgment",        "Judgment",              "JONES MARY B",          "CAPITAL ONE NA",   87500),
+        ("FTL",  "lien",            "Federal Tax Lien",      "WILLIAMS DAVID",        "IRS",              45200),
+        ("ML",   "lien",            "Mechanics Lien",        "BROWN MICHAEL",         "LONE STAR CONTR",  22000),
+        ("PROB", "probate",         "Probate",               "ESTATE OF DAVIS JAMES", "TARRANT CO PROB",      0),
+        ("STL",  "lien",            "State Tax Lien",        "HENDERSON ROBERT",      "STATE OF TEXAS",    9800),
+        ("CL",   "lien",            "Child Support Lien",    "RODRIGUEZ JUAN",        "ATTY/GEN",          5000),
+        ("L",    "lien",            "Lien",                  "THOMPSON SARAH",        "TARRANT HOA",       2100),
+        ("AOH",  "probate",         "Affidavit of Heirship", "GARCIA CARLOS",         "GARCIA MARIA",         0),
     ]
     base = datetime.strptime(date_from, "%m/%d/%Y")
     recs = []
@@ -345,13 +342,13 @@ def generate_demo_records(date_from: str, date_to: str) -> list:
             "grantee":   grantee,
             "legal":     "DEMO RECORD",
             "amount":    float(amt) if amt else None,
-            "clerk_url": f"{BASE_URL}/results?department=RP&_docTypes={code}&searchType=advancedSearch",
+            "clerk_url": f"{BASE_URL}/results?department=RP&_docTypes={code}&searchType=quickSearch",
             "_demo":     True,
         })
     return recs
 
 
-# ── ENRICHMENT ────────────────────────────────────────────────────────────
+# ── ENRICHMENT ────────────────────────────────────────────────────────────────
 
 def enrich_with_parcel(records: list, lookup: dict) -> list:
     fuzzy_index = []
@@ -366,7 +363,8 @@ def enrich_with_parcel(records: list, lookup: dict) -> list:
     matched = 0
     for rec in records:
         dtype  = rec.get("doc_type", "")
-        owner  = (rec.get("grantee") if dtype in GRANTEE_IS_OWNER else rec.get("grantor") or "").upper().strip()
+        owner  = (rec.get("grantee") if dtype in GRANTEE_IS_OWNER
+                  else rec.get("grantor") or "").upper().strip()
         parcel = None
 
         if is_entity(owner):
@@ -398,7 +396,8 @@ def enrich_with_parcel(records: list, lookup: dict) -> list:
                         break
                     o_str = " ".join(sorted(o_firsts))
                     c_str = " ".join(sorted(c_firsts))
-                    if o_str and c_str and SequenceMatcher(None, o_str, c_str).ratio() >= 0.85:
+                    if o_str and c_str and SequenceMatcher(
+                            None, o_str, c_str).ratio() >= 0.85:
                         parcel = candidate
                         break
 
@@ -419,7 +418,7 @@ def enrich_with_parcel(records: list, lookup: dict) -> list:
     return records
 
 
-# ── SCORING ───────────────────────────────────────────────────────────────
+# ── SCORING ───────────────────────────────────────────────────────────────────
 
 def score_record(rec: dict) -> tuple:
     score = 30
@@ -428,17 +427,12 @@ def score_record(rec: dict) -> tuple:
     amount = rec.get("amount") or 0
 
     if dtype == "LP":                flags.append("Lis pendens")
-    if dtype in ("FTL","STL","NLF"): flags.append("Tax lien")
-    if dtype in ("JUD","AJ"):        flags.append("Judgment lien")
-    if dtype in ("PB","AH"):         flags.append("Probate / estate")
+    if dtype in ("FTL","STL"):       flags.append("Tax lien")
+    if dtype in ("J",):              flags.append("Judgment lien")
+    if dtype in ("PROB","AOH"):      flags.append("Probate / estate")
     if dtype == "ML":                flags.append("Mechanic lien")
-    if dtype in ("LC","ALN","ADL"):  flags.append("Lien")
-    if dtype == "CSL":               flags.append("Child support lien")
-    if dtype == "HL":                flags.append("Hospital lien")
-
-    owner = rec.get("owner", "").upper()
-    if any(x in owner for x in ("LLC", "INC", "CORP", "LTD", "LP ", "L.P.")):
-        flags.append("LLC / corp owner")
+    if dtype in ("L","CL"):          flags.append("Lien")
+    if dtype == "DIV":               flags.append("Divorce")
 
     try:
         filed = datetime.strptime(rec.get("filed", ""), "%Y-%m-%d")
@@ -451,7 +445,6 @@ def score_record(rec: dict) -> tuple:
     score += 10 * len(flags)
     if "Lis pendens" in flags:      score += 20
     if "Probate / estate" in flags: score += 10
-    if "Bankruptcy" in flags:       score += 15
     if amount and amount > 100_000: score += 15
     elif amount and amount > 50_000: score += 10
     if "New this week" in flags:    score += 5
@@ -459,7 +452,7 @@ def score_record(rec: dict) -> tuple:
     return min(score, 100), flags
 
 
-# ── OUTPUT ────────────────────────────────────────────────────────────────
+# ── OUTPUT ────────────────────────────────────────────────────────────────────
 
 def build_output(raw_records: list, date_from: str, date_to: str) -> dict:
     out_records = []
@@ -565,7 +558,7 @@ def export_ghl_csv(data: dict):
     log.info("GHL CSV saved")
 
 
-# ── MAIN ──────────────────────────────────────────────────────────────────
+# ── MAIN ──────────────────────────────────────────────────────────────────────
 
 async def main():
     today     = datetime.today()
