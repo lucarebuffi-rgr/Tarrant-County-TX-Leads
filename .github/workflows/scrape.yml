@@ -28,7 +28,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install playwright httpx gdown
+          pip install playwright httpx "gdown>=4.7.1"
           playwright install chromium
           playwright install-deps chromium
 
