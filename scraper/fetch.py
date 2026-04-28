@@ -132,7 +132,7 @@ def build_parcel_lookup() -> dict:
     log.info("Downloading TAD CAD data via Google Drive ...")
     try:
         tmp_path = "/tmp/tad_res.zip"
-        gdown.download(id=GDRIVE_FILE_ID, output=tmp_path, quiet=False)
+        gdown.download(id=GDRIVE_FILE_ID, output=tmp_path, quiet=False, fuzzy=True)
 
         zf   = zipfile.ZipFile(tmp_path)
         name = next(n for n in zf.namelist() if n.upper().endswith(".TXT"))
