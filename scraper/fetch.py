@@ -17,23 +17,19 @@ try:
 except ImportError:
     HAS_PLAYWRIGHT = False
 
+import logging
 import gdown
 
-logging_import = True
-try:
-    import logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-    log = logging.getLogger(__name__)
-except Exception:
-    logging_import = False
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+log = logging.getLogger(__name__)
 
 LOOKBACK_DAYS   = int(os.getenv("LOOKBACK_DAYS", "14"))
 BASE_URL        = "https://tarrant.tx.publicsearch.us"
-GDRIVE_FILE_ID  = "1rM_teshJtTosA92fsHQ5MqxVu4oK5int"
+GDRIVE_FILE_ID  = "15mGtf6hZ6EuhnSTkCOZ44VsE6LofN8on"
 PAGE_LIMIT      = 250
 REQUEST_TIMEOUT = 300
 
@@ -132,7 +128,8 @@ def build_parcel_lookup() -> dict:
     log.info("Downloading TAD CAD data via Google Drive ...")
     try:
         tmp_path = "/tmp/tad_res.zip"
-        gdown.download(id=GDRIVE_FILE_ID, output=tmp_path, quiet=False, fuzzy=True)
+        url = f"https://drive.google.com/uc?export=download&id={GDRIVE_FILE_ID}&confirm=t"
+        gdown.download(url=url, output=tmp_path, quiet=False)
 
         zf   = zipfile.ZipFile(tmp_path)
         name = next(n for n in zf.namelist() if n.upper().endswith(".TXT"))
